@@ -2,12 +2,14 @@ import socket
 import threading
 import sqlite3
 import bcrypt
+import time
 
 HOST = '127.0.0.1'
 PORT = 12345
 
 clients = {}
 rooms = {}
+room_last_active = {}
 
 # Database setup
 conn = sqlite3.connect('chat.db', check_same_thread=False)
@@ -174,15 +176,50 @@ def handle_client(client_socket, addr):
     finally:
         if room_id and client_socket in rooms.get(room_id, []):
             rooms[room_id].remove(client_socket)
+            if not rooms[room_id]:
+                room_last_active[room_id] = time.time()
+
         if client_socket in clients:
             del clients[client_socket]
         client_socket.close()
+
+
+def auto_remove_inactive_rooms():
+    while True:
+        time.sleep(60)
+        now = time.time()
+        to_delete = []
+
+        for room_id, sockets in list(rooms.items()):
+            if not sockets:
+                if room_id not in room_last_active:
+                    room_last_active[room_id] = now
+                elif now - room_last_active[room_id] >= 180:  # 3 minutes
+                    to_delete.append(room_id)
+            else:
+                room_last_active.pop(room_id, None)
+
+        for room_id in to_delete:
+            del rooms[room_id]
+            room_last_active.pop(room_id, None)
+
+            try:
+                conn = sqlite3.connect("chat.db")
+                c = conn.cursor()
+                c.execute("DELETE FROM rooms WHERE room_id = ?", (room_id,))
+                conn.commit()
+                conn.close()
+                print(f"[INFO] Removed inactive room from DB: {room_id}")
+            except Exception as e:
+                print(f"[ERROR] Failed to delete room {room_id} from DB: {e}")
 
 def main():
     server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     server.bind((HOST, PORT))
     server.listen()
     print(f"[+] Server started on {HOST}:{PORT}")
+    
+    threading.Thread(target=auto_remove_inactive_rooms, daemon=True).start()
 
     while True:
         client_socket, addr = server.accept()
